@@ -333,12 +333,17 @@ export default class FundWatchPlugin extends Plugin {
 
   async activateView() {
     const { workspace } = this.app;
-    let leaf = workspace.getLeavesOfType(VIEW_TYPE_FUND_WATCH)[0];
+    let leaf: WorkspaceLeaf | null =
+      workspace.getLeavesOfType(VIEW_TYPE_FUND_WATCH)[0] ?? null;
     if (!leaf) {
       leaf = workspace.getRightLeaf(false);
-      await leaf.setViewState({ type: VIEW_TYPE_FUND_WATCH, active: true });
+      if (leaf) {
+        await leaf.setViewState({ type: VIEW_TYPE_FUND_WATCH, active: true });
+      }
     }
-    workspace.revealLeaf(leaf);
+    if (leaf) {
+      workspace.revealLeaf(leaf);
+    }
   }
 
   async loadSettings() {
