@@ -1,6 +1,6 @@
 {
   "name": "obsidian-fund-watch",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "在 Obsidian 侧边栏实时查看基金 / ETF 行情与迷你走势图",
   "main": "main.js",
   "scripts": {

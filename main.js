@@ -122,9 +122,24 @@ async function fetchFund(code) {
     updatedAt: datas[0]?.FSRQ ?? ""
   };
 }
+function withTimeout(p, ms) {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error("\u8BF7\u6C42\u8D85\u65F6")), ms);
+    p.then(
+      (v) => {
+        window.clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        window.clearTimeout(timer);
+        reject(e);
+      }
+    );
+  });
+}
 async function fetchSnapshot(cfg) {
   try {
-    return cfg.type === "etf" ? await fetchEtf(cfg.code) : await fetchFund(cfg.code);
+    return cfg.type === "etf" ? await withTimeout(fetchEtf(cfg.code), 15e3) : await withTimeout(fetchFund(cfg.code), 15e3);
   } catch {
     return {
       code: cfg.code,
@@ -229,25 +244,40 @@ var FundWatchView = class extends import_obsidian.ItemView {
         () => window.setTimeout(() => btn.classList.remove("fw-spin"), 500)
       );
     });
-    const funds = parseFunds(this.plugin.settings.funds);
-    const snapshots = await Promise.all(funds.map(fetchSnapshot));
-    meta.textContent = `\u5171 ${snapshots.length} \u53EA \xB7 ${nowHM()}`;
     const list = root.createDiv({ cls: "fw-list" });
-    for (const s of snapshots) {
-      const card = list.createDiv({ cls: "fw-card" });
-      const info = card.createDiv({ cls: "fw-info" });
-      info.createDiv({ cls: "fw-name", text: s.name || s.code });
-      const sub = s.type === "fund" && s.updatedAt ? `${s.code} \xB7 \u51C0\u503C ${s.updatedAt}` : s.code;
-      info.createDiv({ cls: "fw-code", text: sub });
-      const chart = card.createDiv({ cls: "fw-chart" });
-      chart.appendChild(sparkline(s.series, pctColor(s.changePercent)));
-      const right = card.createDiv({ cls: "fw-right" });
-      const pct = right.createDiv({ cls: "fw-pct " + pctClass(s.changePercent) });
-      pct.textContent = (s.changePercent > 0 ? "+" : "") + s.changePercent.toFixed(2) + "%";
-      right.createDiv({
-        cls: "fw-price",
-        text: s.price ? s.price.toFixed(4) : "\u2014"
+    const loading = list.createDiv({ cls: "fw-meta", text: "\u52A0\u8F7D\u4E2D\u2026" });
+    try {
+      const funds = parseFunds(this.plugin.settings.funds);
+      const snapshots = await Promise.all(funds.map(fetchSnapshot));
+      if (!list.isConnected) return;
+      list.empty();
+      meta.textContent = `\u5171 ${snapshots.length} \u53EA \xB7 ${nowHM()}`;
+      for (const s of snapshots) {
+        const card = list.createDiv({ cls: "fw-card" });
+        const info = card.createDiv({ cls: "fw-info" });
+        info.createDiv({ cls: "fw-name", text: s.name || s.code });
+        const sub = s.type === "fund" && s.updatedAt ? `${s.code} \xB7 \u51C0\u503C ${s.updatedAt}` : s.updatedAt === "\u83B7\u53D6\u5931\u8D25" ? `${s.code} \xB7 \u83B7\u53D6\u5931\u8D25` : s.code;
+        info.createDiv({ cls: "fw-code", text: sub });
+        const chart = card.createDiv({ cls: "fw-chart" });
+        chart.appendChild(sparkline(s.series, pctColor(s.changePercent)));
+        const right = card.createDiv({ cls: "fw-right" });
+        const pct = right.createDiv({
+          cls: "fw-pct " + pctClass(s.changePercent)
+        });
+        pct.textContent = (s.changePercent > 0 ? "+" : "") + s.changePercent.toFixed(2) + "%";
+        right.createDiv({
+          cls: "fw-price",
+          text: s.price ? s.price.toFixed(4) : "\u2014"
+        });
+      }
+    } catch (err) {
+      if (!list.isConnected) return;
+      list.empty();
+      list.createDiv({
+        cls: "fw-meta",
+        text: `\u52A0\u8F7D\u5931\u8D25\uFF1A${err instanceof Error ? err.message : String(err)}\uFF0C\u8BF7\u70B9\u51FB \u21BB \u91CD\u8BD5`
       });
+      meta.textContent = "\u52A0\u8F7D\u5931\u8D25";
     }
   }
 };
@@ -342,18 +372,33 @@ var FundWatchPlugin = class extends import_obsidian.Plugin {
       }
     });
     this.addSettingTab(new FundWatchSettingTab(this.app, this));
-    new import_obsidian.Notice("\u57FA\u91D1\u52A8\u6001\uFF1A\u70B9\u51FB\u5DE6\u4FA7\u56FE\u8868\u56FE\u6807\u6253\u5F00\u9762\u677F");
   }
   onunload() {
   }
   async activateView() {
     const { workspace } = this.app;
-    let leaf = workspace.getLeavesOfType(VIEW_TYPE_FUND_WATCH)[0] ?? null;
-    if (!leaf) {
-      leaf = workspace.getRightLeaf(false);
-      if (leaf) {
-        await leaf.setViewState({ type: VIEW_TYPE_FUND_WATCH, active: true });
+    try {
+      const existing = workspace.getLeavesOfType(VIEW_TYPE_FUND_WATCH);
+      if (existing.length > 0) {
+        await existing[0].setViewState({
+          type: VIEW_TYPE_FUND_WATCH,
+          active: true
+        });
+        return;
       }
+      let leaf = workspace.getRightLeaf(false);
+      if (!leaf) leaf = workspace.getLeftLeaf(false);
+      if (!leaf) leaf = workspace.getLeaf(true);
+      if (!leaf) {
+        new import_obsidian.Notice("\u57FA\u91D1\u52A8\u6001\uFF1A\u65E0\u6CD5\u521B\u5EFA\u89C6\u56FE\uFF0C\u8BF7\u91CD\u542F Obsidian \u540E\u91CD\u8BD5");
+        return;
+      }
+      await leaf.setViewState({ type: VIEW_TYPE_FUND_WATCH, active: true });
+    } catch (err) {
+      console.error("[fund-watch] activateView failed:", err);
+      new import_obsidian.Notice(
+        `\u57FA\u91D1\u52A8\u6001\u6253\u5F00\u5931\u8D25\uFF1A${err instanceof Error ? err.message : String(err)}`
+      );
     }
   }
   async loadSettings() {

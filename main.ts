@@ -157,9 +157,28 @@ async function fetchFund(code: string): Promise<FundSnapshot> {
   };
 }
 
+// 给请求加超时保护，避免接口卡死导致面板一直空白
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error("请求超时")), ms);
+    p.then(
+      (v) => {
+        window.clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        window.clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
+
 async function fetchSnapshot(cfg: FundConfig): Promise<FundSnapshot> {
   try {
-    return cfg.type === "etf" ? await fetchEtf(cfg.code) : await fetchFund(cfg.code);
+    return cfg.type === "etf"
+      ? await withTimeout(fetchEtf(cfg.code), 15000)
+      : await withTimeout(fetchFund(cfg.code), 15000);
   } catch {
     return {
       code: cfg.code,
@@ -283,33 +302,54 @@ class FundWatchView extends ItemView {
       );
     });
 
-    const funds = parseFunds(this.plugin.settings.funds);
-    const snapshots = await Promise.all(funds.map(fetchSnapshot));
-    meta.textContent = `共 ${snapshots.length} 只 · ${nowHM()}`;
-
+    // 先画出骨架，再异步填数据，避免网络慢时面板空白
     const list = root.createDiv({ cls: "fw-list" });
-    for (const s of snapshots) {
-      const card = list.createDiv({ cls: "fw-card" });
+    const loading = list.createDiv({ cls: "fw-meta", text: "加载中…" });
 
-      const info = card.createDiv({ cls: "fw-info" });
-      info.createDiv({ cls: "fw-name", text: s.name || s.code });
-      const sub =
-        s.type === "fund" && s.updatedAt
-          ? `${s.code} · 净值 ${s.updatedAt}`
-          : s.code;
-      info.createDiv({ cls: "fw-code", text: sub });
+    try {
+      const funds = parseFunds(this.plugin.settings.funds);
+      const snapshots = await Promise.all(funds.map(fetchSnapshot));
+      // 期间用户可能点了刷新，重画前列表若已 detach 则放弃本次
+      if (!list.isConnected) return;
 
-      const chart = card.createDiv({ cls: "fw-chart" });
-      chart.appendChild(sparkline(s.series, pctColor(s.changePercent)));
+      list.empty();
+      meta.textContent = `共 ${snapshots.length} 只 · ${nowHM()}`;
 
-      const right = card.createDiv({ cls: "fw-right" });
-      const pct = right.createDiv({ cls: "fw-pct " + pctClass(s.changePercent) });
-      pct.textContent =
-        (s.changePercent > 0 ? "+" : "") + s.changePercent.toFixed(2) + "%";
-      right.createDiv({
-        cls: "fw-price",
-        text: s.price ? s.price.toFixed(4) : "—",
+      for (const s of snapshots) {
+        const card = list.createDiv({ cls: "fw-card" });
+
+        const info = card.createDiv({ cls: "fw-info" });
+        info.createDiv({ cls: "fw-name", text: s.name || s.code });
+        const sub =
+          s.type === "fund" && s.updatedAt
+            ? `${s.code} · 净值 ${s.updatedAt}`
+            : s.updatedAt === "获取失败"
+              ? `${s.code} · 获取失败`
+              : s.code;
+        info.createDiv({ cls: "fw-code", text: sub });
+
+        const chart = card.createDiv({ cls: "fw-chart" });
+        chart.appendChild(sparkline(s.series, pctColor(s.changePercent)));
+
+        const right = card.createDiv({ cls: "fw-right" });
+        const pct = right.createDiv({
+          cls: "fw-pct " + pctClass(s.changePercent),
+        });
+        pct.textContent =
+          (s.changePercent > 0 ? "+" : "") + s.changePercent.toFixed(2) + "%";
+        right.createDiv({
+          cls: "fw-price",
+          text: s.price ? s.price.toFixed(4) : "—",
+        });
+      }
+    } catch (err) {
+      if (!list.isConnected) return;
+      list.empty();
+      list.createDiv({
+        cls: "fw-meta",
+        text: `加载失败：${err instanceof Error ? err.message : String(err)}，请点击 ↻ 重试`,
       });
+      meta.textContent = "加载失败";
     }
   }
 }
@@ -429,7 +469,6 @@ export default class FundWatchPlugin extends Plugin {
       },
     });
     this.addSettingTab(new FundWatchSettingTab(this.app, this));
-    new Notice("基金动态：点击左侧图表图标打开面板");
   }
 
   onunload() {
@@ -438,13 +477,30 @@ export default class FundWatchPlugin extends Plugin {
 
   async activateView() {
     const { workspace } = this.app;
-    let leaf: WorkspaceLeaf | null =
-      workspace.getLeavesOfType(VIEW_TYPE_FUND_WATCH)[0] ?? null;
-    if (!leaf) {
-      leaf = workspace.getRightLeaf(false);
-      if (leaf) {
-        await leaf.setViewState({ type: VIEW_TYPE_FUND_WATCH, active: true });
+    try {
+      // 已有该视图的 leaf：重新激活使其可见
+      const existing = workspace.getLeavesOfType(VIEW_TYPE_FUND_WATCH);
+      if (existing.length > 0) {
+        await existing[0].setViewState({
+          type: VIEW_TYPE_FUND_WATCH,
+          active: true,
+        });
+        return;
       }
+      // 依次尝试右侧栏 -> 左侧栏 -> 新分屏，确保一定能拿到 leaf
+      let leaf: WorkspaceLeaf | null = workspace.getRightLeaf(false);
+      if (!leaf) leaf = workspace.getLeftLeaf(false);
+      if (!leaf) leaf = workspace.getLeaf(true);
+      if (!leaf) {
+        new Notice("基金动态：无法创建视图，请重启 Obsidian 后重试");
+        return;
+      }
+      await leaf.setViewState({ type: VIEW_TYPE_FUND_WATCH, active: true });
+    } catch (err) {
+      console.error("[fund-watch] activateView failed:", err);
+      new Notice(
+        `基金动态打开失败：${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 
