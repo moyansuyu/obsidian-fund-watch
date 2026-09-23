@@ -1,0 +1,10 @@
+{
+  "id": "fund-watch",
+  "name": "Fund Watch 基金动态",
+  "version": "0.1.0",
+  "minAppVersion": "1.4.0",
+  "description": "在 Obsidian 侧边栏实时查看基金 / ETF 行情与迷你走势图",
+  "author": "moyansuyu",
+  "authorUrl": "https://github.com/moyansuyu",
+  "isDesktopOnly": false
+}

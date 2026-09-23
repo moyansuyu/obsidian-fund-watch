@@ -1,0 +1,101 @@
+.fund-watch-root {
+  padding: 8px;
+}
+
+.fw-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 6px 10px;
+  border-bottom: 0.5px solid var(--background-modifier-border);
+}
+
+.fw-title {
+  font-weight: 500;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.fw-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.fw-refresh {
+  background: transparent;
+  border: 0.5px solid var(--background-modifier-border);
+  border-radius: 6px;
+  cursor: pointer;
+  width: 26px;
+  height: 26px;
+  font-size: 14px;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.fw-refresh.fw-spin {
+  animation: fw-rot 0.6s linear infinite;
+}
+
+@keyframes fw-rot {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.fw-list {
+  padding: 6px 0;
+}
+
+.fw-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 6px;
+  border-radius: 8px;
+}
+
+.fw-card:hover {
+  background: var(--background-secondary);
+}
+
+.fw-info {
+  min-width: 110px;
+}
+
+.fw-name {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.fw-code {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.fw-chart {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+}
+
+.fw-right {
+  text-align: right;
+  min-width: 64px;
+}
+
+.fw-pct {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.fw-price {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
