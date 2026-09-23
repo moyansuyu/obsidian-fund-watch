@@ -6,6 +6,7 @@ import {
   WorkspaceLeaf,
   requestUrl,
   Notice,
+  App,
 } from "obsidian";
 
 export const VIEW_TYPE_FUND_WATCH = "fund-watch-view";
@@ -46,12 +47,14 @@ function parseFunds(raw: string): FundConfig[] {
     if (parts.length === 0 || !parts[0]) continue;
     const code = parts[0];
     const explicit = parts[1];
-    const type: "etf" | "fund" =
-      explicit === "fund" || explicit === "etf"
-        ? (explicit as "etf" | "fund")
-        : code.startsWith("5") || code.startsWith("1")
-          ? "etf"
-          : "fund";
+    let type: "etf" | "fund";
+    if (explicit === "fund" || explicit === "etf") {
+      type = explicit;
+    } else if (code.startsWith("5") || code.startsWith("1")) {
+      type = "etf";
+    } else {
+      type = "fund";
+    }
     out.push({ code, type });
   }
   return out;
@@ -64,19 +67,27 @@ function secid(code: string): string {
   return `${sh ? "1" : "0"}.${code}`;
 }
 
+// 东财接口返回的 JSON 形状（仅声明用到的字段，规避 any）
+interface EmQuote {
+  data?: { f2?: string; f3?: string; f14?: string };
+}
+interface EmKline {
+  data?: { klines?: string[] };
+}
+
 // 场内 ETF：实时行情 + 日 K 走势
 async function fetchEtf(code: string): Promise<FundSnapshot> {
   const id = secid(code);
   const quoteUrl = `https://push2.eastmoney.com/api/qt/stock/get?secid=${id}&fields=f12,f14,f2,f3,f4`;
   const klineUrl = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${id}&fields1=f1,f2,f3&fields2=f51,f52&klt=101&fqt=1&end=20500101&lmt=30`;
-  const [q, k] = await Promise.all([
-    requestUrl({ url: quoteUrl }).then((r) => r.json()),
-    requestUrl({ url: klineUrl }).then((r) => r.json()),
-  ]);
-  const d = q?.data ?? {};
-  const price = parseFloat(d.f2);
-  const changePercent = parseFloat(d.f3);
-  const klines: string[] = k?.data?.klines ?? [];
+  const qResp = await requestUrl({ url: quoteUrl });
+  const kResp = await requestUrl({ url: klineUrl });
+  const q = qResp.json() as EmQuote;
+  const k = kResp.json() as EmKline;
+  const d = q.data ?? {};
+  const price = parseFloat(d.f2 ?? "");
+  const changePercent = parseFloat(d.f3 ?? "");
+  const klines: string[] = k.data?.klines ?? [];
   const series = klines
     .map((s) => parseFloat(s.split(",")[1]))
     .filter((n) => !isNaN(n));
@@ -95,13 +106,23 @@ async function fetchEtf(code: string): Promise<FundSnapshot> {
 }
 
 // 场外基金：每日净值历史（同时充当走势与涨跌幅）
+interface FundNavItem {
+  FSRQ: string;
+  DWJZ: string;
+}
+interface FundNavResp {
+  Datas?: FundNavItem[];
+  Expansion?: Array<{ FUND_NAME?: string }>;
+}
+
 async function fetchFund(code: string): Promise<FundSnapshot> {
   const url = `https://fundmobapi.eastmoney.com/f10/fund/DWJZ?fundCode=${code}&pageIndex=1&pageSize=30`;
   const res = await requestUrl({
     url,
     headers: { Referer: "https://m.fund.eastmoney.com/" },
-  }).then((r) => r.json());
-  const datas: Array<{ FSRQ: string; DWJZ: string }> = res?.Datas ?? [];
+  });
+  const data = res.json() as FundNavResp;
+  const datas: FundNavItem[] = data.Datas ?? [];
   if (datas.length === 0) {
     return {
       code,
@@ -113,9 +134,7 @@ async function fetchFund(code: string): Promise<FundSnapshot> {
       updatedAt: "",
     };
   }
-  const navs = datas
-    .map((d) => parseFloat(d.DWJZ))
-    .filter((n) => !isNaN(n));
+  const navs = datas.map((d) => parseFloat(d.DWJZ)).filter((n) => !isNaN(n));
   const series = [...navs].reverse(); // 旧 -> 新
   const latest = navs[0];
   const prev = navs[1] ?? latest;
@@ -123,7 +142,7 @@ async function fetchFund(code: string): Promise<FundSnapshot> {
   return {
     code,
     type: "fund",
-    name: res?.Expansion?.[0]?.FUND_NAME ?? code,
+    name: data.Expansion?.[0]?.FUND_NAME ?? code,
     price: latest,
     changePercent,
     series,
@@ -134,7 +153,7 @@ async function fetchFund(code: string): Promise<FundSnapshot> {
 async function fetchSnapshot(cfg: FundConfig): Promise<FundSnapshot> {
   try {
     return cfg.type === "etf" ? await fetchEtf(cfg.code) : await fetchFund(cfg.code);
-  } catch (e) {
+  } catch {
     return {
       code: cfg.code,
       type: cfg.type,
@@ -147,31 +166,54 @@ async function fetchSnapshot(cfg: FundConfig): Promise<FundSnapshot> {
   }
 }
 
-// 迷你走势图（SVG polyline）
-function sparkline(series: number[], color: string): string {
+// 迷你走势图（用 DOM 创建 SVG，避免 innerHTML）
+function sparkline(series: number[], color: string): SVGElement {
+  const NS = "http://www.w3.org/2000/svg";
   const w = 90;
   const h = 30;
   const pad = 3;
-  if (series.length < 2) {
-    return `<svg width="${w}" height="${h}"></svg>`;
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("width", String(w));
+  svg.setAttribute("height", String(h));
+  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  if (series.length >= 2) {
+    const min = Math.min(...series);
+    const max = Math.max(...series);
+    const span = max - min || 1;
+    const n = series.length;
+    const pts = series
+      .map((v, i) => {
+        const x = pad + (i / (n - 1)) * (w - pad * 2);
+        const y = h - pad - ((v - min) / span) * (h - pad * 2);
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      })
+      .join(" ");
+    const pl = document.createElementNS(NS, "polyline");
+    pl.setAttribute("points", pts);
+    pl.setAttribute("fill", "none");
+    pl.setAttribute("stroke", color);
+    pl.setAttribute("stroke-width", "1.5");
+    pl.setAttribute("stroke-linecap", "round");
+    pl.setAttribute("stroke-linejoin", "round");
+    svg.appendChild(pl);
   }
-  const min = Math.min(...series);
-  const max = Math.max(...series);
-  const span = max - min || 1;
-  const n = series.length;
-  const pts = series
-    .map((v, i) => {
-      const x = pad + (i / (n - 1)) * (w - pad * 2);
-      const y = h - pad - ((v - min) / span) * (h - pad * 2);
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .join(" ");
-  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  return svg;
 }
 
 // A 股习惯：涨红跌绿
 function pctColor(p: number): string {
   return p > 0 ? "#A32D2D" : p < 0 ? "#3B6D11" : "#888780";
+}
+
+function pctClass(p: number): string {
+  return p > 0 ? "fw-up" : p < 0 ? "fw-down" : "fw-flat";
+}
+
+function nowHM(): string {
+  return new Date().toLocaleTimeString("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 class FundWatchView extends ItemView {
@@ -194,7 +236,7 @@ class FundWatchView extends ItemView {
   }
 
   async onOpen() {
-    this.render();
+    await this.render();
     this.startTimer();
   }
 
@@ -206,7 +248,9 @@ class FundWatchView extends ItemView {
   private startTimer() {
     this.stopTimer();
     const ms = Math.max(1, this.plugin.settings.refreshMinutes) * 60 * 1000;
-    this.timer = window.setInterval(() => this.render(), ms);
+    this.timer = window.setInterval(() => {
+      void this.render();
+    }, ms);
   }
 
   private stopTimer() {
@@ -227,17 +271,14 @@ class FundWatchView extends ItemView {
     const btn = header.createEl("button", { cls: "fw-refresh", text: "↻" });
     btn.addEventListener("click", () => {
       btn.classList.add("fw-spin");
-      this.render().finally(() =>
+      void this.render().finally(() =>
         window.setTimeout(() => btn.classList.remove("fw-spin"), 500),
       );
     });
 
     const funds = parseFunds(this.plugin.settings.funds);
     const snapshots = await Promise.all(funds.map(fetchSnapshot));
-    meta.textContent = `共 ${snapshots.length} 只 · ${new Date().toLocaleTimeString(
-      "zh-CN",
-      { hour: "2-digit", minute: "2-digit" },
-    )}`;
+    meta.textContent = `共 ${snapshots.length} 只 · ${nowHM()}`;
 
     const list = root.createDiv({ cls: "fw-list" });
     for (const s of snapshots) {
@@ -252,13 +293,12 @@ class FundWatchView extends ItemView {
       info.createDiv({ cls: "fw-code", text: sub });
 
       const chart = card.createDiv({ cls: "fw-chart" });
-      chart.innerHTML = sparkline(s.series, pctColor(s.changePercent));
+      chart.appendChild(sparkline(s.series, pctColor(s.changePercent)));
 
       const right = card.createDiv({ cls: "fw-right" });
-      const pct = right.createDiv({ cls: "fw-pct" });
+      const pct = right.createDiv({ cls: "fw-pct " + pctClass(s.changePercent) });
       pct.textContent =
         (s.changePercent > 0 ? "+" : "") + s.changePercent.toFixed(2) + "%";
-      pct.style.color = pctColor(s.changePercent);
       right.createDiv({
         cls: "fw-price",
         text: s.price ? s.price.toFixed(4) : "—",
@@ -270,14 +310,15 @@ class FundWatchView extends ItemView {
 class FundWatchSettingTab extends PluginSettingTab {
   plugin: FundWatchPlugin;
 
-  constructor(app: any, plugin: FundWatchPlugin) {
+  constructor(app: App, plugin: FundWatchPlugin) {
     super(app, plugin);
   }
 
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "基金动态 设置" });
+
+    new Setting(containerEl).setName("基金动态 设置").setHeading();
 
     new Setting(containerEl)
       .setName("基金列表")
@@ -285,8 +326,8 @@ class FundWatchSettingTab extends PluginSettingTab {
         "每行一只，格式：代码 [etf|fund]。etf 为场内实时行情，fund 为场外净值（每日更新）。不写类型会按代码前缀自动判断。",
       )
       .addTextArea((t) => {
+        t.inputEl.addClass("fw-textarea");
         t.inputEl.setAttr("rows", 8);
-        t.inputEl.style.width = "100%";
         t.setValue(this.plugin.settings.funds).onChange(async (v) => {
           this.plugin.settings.funds = v;
           await this.plugin.saveSettings();
@@ -300,10 +341,7 @@ class FundWatchSettingTab extends PluginSettingTab {
         t
           .setValue(String(this.plugin.settings.refreshMinutes))
           .onChange(async (v) => {
-            this.plugin.settings.refreshMinutes = Math.max(
-              1,
-              parseInt(v) || 1,
-            );
+            this.plugin.settings.refreshMinutes = Math.max(1, parseInt(v) || 1);
             await this.plugin.saveSettings();
           }),
       );
@@ -315,13 +353,10 @@ export default class FundWatchPlugin extends Plugin {
 
   async onload() {
     await this.loadSettings();
-    this.registerView(
-      VIEW_TYPE_FUND_WATCH,
-      (leaf) => new FundWatchView(leaf, this),
-    );
+    this.registerView(VIEW_TYPE_FUND_WATCH, (leaf) => new FundWatchView(leaf, this));
     this.addRibbonIcon("line-chart", "打开基金动态", () => this.activateView());
     this.addCommand({
-      id: "open-fund-watch",
+      id: "open-panel",
       name: "打开基金动态面板",
       callback: () => this.activateView(),
     });
@@ -329,7 +364,9 @@ export default class FundWatchPlugin extends Plugin {
     new Notice("基金动态：点击左侧图表图标打开面板");
   }
 
-  async onunload() {}
+  onunload() {
+    // 视图由 Obsidian 在卸载时自动关闭，无需手动处理
+  }
 
   async activateView() {
     const { workspace } = this.app;
@@ -341,13 +378,11 @@ export default class FundWatchPlugin extends Plugin {
         await leaf.setViewState({ type: VIEW_TYPE_FUND_WATCH, active: true });
       }
     }
-    if (leaf) {
-      workspace.revealLeaf(leaf);
-    }
   }
 
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const data = (await this.loadData()) as Partial<FundWatchSettings> | null;
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, data ?? {});
   }
 
   async saveSettings() {

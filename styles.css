@@ -94,8 +94,25 @@
   font-weight: 500;
 }
 
+/* A 股习惯：涨红跌绿 */
+.fw-pct.fw-up {
+  color: #a32d2d;
+}
+.fw-pct.fw-down {
+  color: #3b6d11;
+}
+.fw-pct.fw-flat {
+  color: #888780;
+}
+
 .fw-price {
   font-size: 11px;
   color: var(--text-muted);
   margin-top: 2px;
+}
+
+/* 设置面板里的基金列表文本框 */
+.fw-textarea {
+  width: 100%;
+  resize: vertical;
 }
