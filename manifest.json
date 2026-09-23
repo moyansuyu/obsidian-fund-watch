@@ -1,7 +1,7 @@
 {
   "id": "fund-watch",
   "name": "Fund Watch",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "minAppVersion": "1.4.0",
   "description": "在侧边栏实时查看基金 / ETF 行情与迷你走势图.",
   "author": "moyansuyu",
