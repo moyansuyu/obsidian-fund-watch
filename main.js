@@ -42,7 +42,14 @@ function parseFunds(raw) {
     if (parts.length === 0 || !parts[0]) continue;
     const code = parts[0];
     const explicit = parts[1];
-    const type = explicit === "fund" || explicit === "etf" ? explicit : code.startsWith("5") || code.startsWith("1") ? "etf" : "fund";
+    let type;
+    if (explicit === "fund" || explicit === "etf") {
+      type = explicit;
+    } else if (code.startsWith("5") || code.startsWith("1")) {
+      type = "etf";
+    } else {
+      type = "fund";
+    }
     out.push({ code, type });
   }
   return out;
@@ -52,18 +59,21 @@ function secid(code) {
   const sh = first === "6" || first === "9" || first === "5";
   return `${sh ? "1" : "0"}.${code}`;
 }
+function asJson(value) {
+  return value;
+}
 async function fetchEtf(code) {
   const id = secid(code);
   const quoteUrl = `https://push2.eastmoney.com/api/qt/stock/get?secid=${id}&fields=f12,f14,f2,f3,f4`;
   const klineUrl = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${id}&fields1=f1,f2,f3&fields2=f51,f52&klt=101&fqt=1&end=20500101&lmt=30`;
-  const [q, k] = await Promise.all([
-    (0, import_obsidian.requestUrl)({ url: quoteUrl }).then((r) => r.json()),
-    (0, import_obsidian.requestUrl)({ url: klineUrl }).then((r) => r.json())
-  ]);
-  const d = q?.data ?? {};
-  const price = parseFloat(d.f2);
-  const changePercent = parseFloat(d.f3);
-  const klines = k?.data?.klines ?? [];
+  const qResp = await (0, import_obsidian.requestUrl)({ url: quoteUrl });
+  const kResp = await (0, import_obsidian.requestUrl)({ url: klineUrl });
+  const q = asJson(qResp.json());
+  const k = asJson(kResp.json());
+  const d = q.data ?? {};
+  const price = parseFloat(d.f2 ?? "");
+  const changePercent = parseFloat(d.f3 ?? "");
+  const klines = k.data?.klines ?? [];
   const series = klines.map((s) => parseFloat(s.split(",")[1])).filter((n) => !isNaN(n));
   return {
     code,
@@ -83,8 +93,9 @@ async function fetchFund(code) {
   const res = await (0, import_obsidian.requestUrl)({
     url,
     headers: { Referer: "https://m.fund.eastmoney.com/" }
-  }).then((r) => r.json());
-  const datas = res?.Datas ?? [];
+  });
+  const data = asJson(res.json());
+  const datas = data.Datas ?? [];
   if (datas.length === 0) {
     return {
       code,
@@ -104,7 +115,7 @@ async function fetchFund(code) {
   return {
     code,
     type: "fund",
-    name: res?.Expansion?.[0]?.FUND_NAME ?? code,
+    name: data.Expansion?.[0]?.FUND_NAME ?? code,
     price: latest,
     changePercent,
     series,
@@ -114,7 +125,7 @@ async function fetchFund(code) {
 async function fetchSnapshot(cfg) {
   try {
     return cfg.type === "etf" ? await fetchEtf(cfg.code) : await fetchFund(cfg.code);
-  } catch (e) {
+  } catch {
     return {
       code: cfg.code,
       type: cfg.type,
@@ -127,25 +138,46 @@ async function fetchSnapshot(cfg) {
   }
 }
 function sparkline(series, color) {
+  const NS = "http://www.w3.org/2000/svg";
   const w = 90;
   const h = 30;
   const pad = 3;
-  if (series.length < 2) {
-    return `<svg width="${w}" height="${h}"></svg>`;
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("width", String(w));
+  svg.setAttribute("height", String(h));
+  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  if (series.length >= 2) {
+    const min = Math.min(...series);
+    const max = Math.max(...series);
+    const span = max - min || 1;
+    const n = series.length;
+    const pts = series.map((v, i) => {
+      const x = pad + i / (n - 1) * (w - pad * 2);
+      const y = h - pad - (v - min) / span * (h - pad * 2);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(" ");
+    const pl = document.createElementNS(NS, "polyline");
+    pl.setAttribute("points", pts);
+    pl.setAttribute("fill", "none");
+    pl.setAttribute("stroke", color);
+    pl.setAttribute("stroke-width", "1.5");
+    pl.setAttribute("stroke-linecap", "round");
+    pl.setAttribute("stroke-linejoin", "round");
+    svg.appendChild(pl);
   }
-  const min = Math.min(...series);
-  const max = Math.max(...series);
-  const span = max - min || 1;
-  const n = series.length;
-  const pts = series.map((v, i) => {
-    const x = pad + i / (n - 1) * (w - pad * 2);
-    const y = h - pad - (v - min) / span * (h - pad * 2);
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  }).join(" ");
-  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  return svg;
 }
 function pctColor(p) {
   return p > 0 ? "#A32D2D" : p < 0 ? "#3B6D11" : "#888780";
+}
+function pctClass(p) {
+  return p > 0 ? "fw-up" : p < 0 ? "fw-down" : "fw-flat";
+}
+function nowHM() {
+  return (/* @__PURE__ */ new Date()).toLocaleTimeString("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit"
+  });
 }
 var FundWatchView = class extends import_obsidian.ItemView {
   constructor(leaf, plugin) {
@@ -163,7 +195,7 @@ var FundWatchView = class extends import_obsidian.ItemView {
     return "line-chart";
   }
   async onOpen() {
-    this.render();
+    await this.render();
     this.startTimer();
   }
   async onClose() {
@@ -173,7 +205,9 @@ var FundWatchView = class extends import_obsidian.ItemView {
   startTimer() {
     this.stopTimer();
     const ms = Math.max(1, this.plugin.settings.refreshMinutes) * 60 * 1e3;
-    this.timer = window.setInterval(() => this.render(), ms);
+    this.timer = window.setInterval(() => {
+      void this.render();
+    }, ms);
   }
   stopTimer() {
     if (this.timer != null) {
@@ -191,16 +225,13 @@ var FundWatchView = class extends import_obsidian.ItemView {
     const btn = header.createEl("button", { cls: "fw-refresh", text: "\u21BB" });
     btn.addEventListener("click", () => {
       btn.classList.add("fw-spin");
-      this.render().finally(
+      void this.render().finally(
         () => window.setTimeout(() => btn.classList.remove("fw-spin"), 500)
       );
     });
     const funds = parseFunds(this.plugin.settings.funds);
     const snapshots = await Promise.all(funds.map(fetchSnapshot));
-    meta.textContent = `\u5171 ${snapshots.length} \u53EA \xB7 ${(/* @__PURE__ */ new Date()).toLocaleTimeString(
-      "zh-CN",
-      { hour: "2-digit", minute: "2-digit" }
-    )}`;
+    meta.textContent = `\u5171 ${snapshots.length} \u53EA \xB7 ${nowHM()}`;
     const list = root.createDiv({ cls: "fw-list" });
     for (const s of snapshots) {
       const card = list.createDiv({ cls: "fw-card" });
@@ -209,11 +240,10 @@ var FundWatchView = class extends import_obsidian.ItemView {
       const sub = s.type === "fund" && s.updatedAt ? `${s.code} \xB7 \u51C0\u503C ${s.updatedAt}` : s.code;
       info.createDiv({ cls: "fw-code", text: sub });
       const chart = card.createDiv({ cls: "fw-chart" });
-      chart.innerHTML = sparkline(s.series, pctColor(s.changePercent));
+      chart.appendChild(sparkline(s.series, pctColor(s.changePercent)));
       const right = card.createDiv({ cls: "fw-right" });
-      const pct = right.createDiv({ cls: "fw-pct" });
+      const pct = right.createDiv({ cls: "fw-pct " + pctClass(s.changePercent) });
       pct.textContent = (s.changePercent > 0 ? "+" : "") + s.changePercent.toFixed(2) + "%";
-      pct.style.color = pctColor(s.changePercent);
       right.createDiv({
         cls: "fw-price",
         text: s.price ? s.price.toFixed(4) : "\u2014"
@@ -221,31 +251,78 @@ var FundWatchView = class extends import_obsidian.ItemView {
     }
   }
 };
+var DECLARATIVE_SETTINGS_VERSION = "1.13.0";
+function supportsDeclarativeSettings() {
+  const parse = (v) => v.split(".").map((s) => parseInt(s, 10) || 0);
+  const cur = parse(import_obsidian.apiVersion);
+  const min = parse(DECLARATIVE_SETTINGS_VERSION);
+  for (let i = 0; i < 3; i++) {
+    if ((cur[i] ?? 0) > (min[i] ?? 0)) return true;
+    if ((cur[i] ?? 0) < (min[i] ?? 0)) return false;
+  }
+  return true;
+}
 var FundWatchSettingTab = class extends import_obsidian.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
   }
+  // 1.13.0+ 的声明式设置定义：让设置项进入全局设置搜索，并用于渲染。
+  // 旧版本不识别此方法，会回落到下面的 display()。
+  getSettingDefinitions() {
+    if (!supportsDeclarativeSettings()) return [];
+    return [
+      {
+        name: "\u57FA\u91D1\u5217\u8868",
+        desc: "\u6BCF\u884C\u4E00\u53EA\uFF0C\u683C\u5F0F\uFF1A\u4EE3\u7801 [etf|fund]\u3002etf \u4E3A\u573A\u5185\u5B9E\u65F6\u884C\u60C5\uFF0Cfund \u4E3A\u573A\u5916\u51C0\u503C\uFF08\u6BCF\u65E5\u66F4\u65B0\uFF09\u3002\u4E0D\u5199\u7C7B\u578B\u4F1A\u6309\u4EE3\u7801\u524D\u7F00\u81EA\u52A8\u5224\u65AD\u3002",
+        aliases: ["fund", "etf", "\u4EE3\u7801"],
+        control: { type: "textarea", key: "funds", rows: 8 }
+      },
+      {
+        name: "\u5237\u65B0\u95F4\u9694\uFF08\u5206\u949F\uFF09",
+        desc: "\u573A\u5185 ETF \u884C\u60C5\u8F6E\u8BE2\u95F4\u9694\uFF0C\u5EFA\u8BAE 1-5 \u5206\u949F\u3002",
+        control: { type: "number", key: "refreshMinutes", defaultValue: 1 }
+      }
+    ];
+  }
+  getControlValue(key) {
+    if (key === "funds") return this.plugin.settings.funds;
+    if (key === "refreshMinutes") return this.plugin.settings.refreshMinutes;
+    return void 0;
+  }
+  setControlValue(key, value) {
+    if (key === "funds" && typeof value === "string") {
+      this.plugin.settings.funds = value;
+      return this.plugin.saveSettings();
+    }
+    if (key === "refreshMinutes") {
+      const n = Math.max(1, parseInt(String(value), 10) || 1);
+      this.plugin.settings.refreshMinutes = n;
+      return this.plugin.saveSettings();
+    }
+    return void 0;
+  }
+  // 兜底：旧版 Obsidian（< 1.13.0）走命令式渲染
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "\u57FA\u91D1\u52A8\u6001 \u8BBE\u7F6E" });
+    new import_obsidian.Setting(containerEl).setName("\u57FA\u91D1\u52A8\u6001 \u8BBE\u7F6E").setHeading();
     new import_obsidian.Setting(containerEl).setName("\u57FA\u91D1\u5217\u8868").setDesc(
       "\u6BCF\u884C\u4E00\u53EA\uFF0C\u683C\u5F0F\uFF1A\u4EE3\u7801 [etf|fund]\u3002etf \u4E3A\u573A\u5185\u5B9E\u65F6\u884C\u60C5\uFF0Cfund \u4E3A\u573A\u5916\u51C0\u503C\uFF08\u6BCF\u65E5\u66F4\u65B0\uFF09\u3002\u4E0D\u5199\u7C7B\u578B\u4F1A\u6309\u4EE3\u7801\u524D\u7F00\u81EA\u52A8\u5224\u65AD\u3002"
     ).addTextArea((t) => {
+      t.inputEl.addClass("fw-textarea");
       t.inputEl.setAttr("rows", 8);
-      t.inputEl.style.width = "100%";
-      t.setValue(this.plugin.settings.funds).onChange(async (v) => {
+      t.setValue(this.plugin.settings.funds).onChange((v) => {
         this.plugin.settings.funds = v;
-        await this.plugin.saveSettings();
+        return this.plugin.saveSettings();
       });
     });
     new import_obsidian.Setting(containerEl).setName("\u5237\u65B0\u95F4\u9694\uFF08\u5206\u949F\uFF09").setDesc("\u573A\u5185 ETF \u884C\u60C5\u8F6E\u8BE2\u95F4\u9694\uFF0C\u5EFA\u8BAE 1-5 \u5206\u949F\u3002").addText(
-      (t) => t.setValue(String(this.plugin.settings.refreshMinutes)).onChange(async (v) => {
+      (t) => t.setValue(String(this.plugin.settings.refreshMinutes)).onChange((v) => {
         this.plugin.settings.refreshMinutes = Math.max(
           1,
           parseInt(v) || 1
         );
-        await this.plugin.saveSettings();
+        return this.plugin.saveSettings();
       })
     );
   }
@@ -253,20 +330,21 @@ var FundWatchSettingTab = class extends import_obsidian.PluginSettingTab {
 var FundWatchPlugin = class extends import_obsidian.Plugin {
   async onload() {
     await this.loadSettings();
-    this.registerView(
-      VIEW_TYPE_FUND_WATCH,
-      (leaf) => new FundWatchView(leaf, this)
-    );
-    this.addRibbonIcon("line-chart", "\u6253\u5F00\u57FA\u91D1\u52A8\u6001", () => this.activateView());
+    this.registerView(VIEW_TYPE_FUND_WATCH, (leaf) => new FundWatchView(leaf, this));
+    this.addRibbonIcon("line-chart", "\u6253\u5F00\u57FA\u91D1\u52A8\u6001", () => {
+      void this.activateView();
+    });
     this.addCommand({
-      id: "open-fund-watch",
+      id: "open-panel",
       name: "\u6253\u5F00\u57FA\u91D1\u52A8\u6001\u9762\u677F",
-      callback: () => this.activateView()
+      callback: () => {
+        void this.activateView();
+      }
     });
     this.addSettingTab(new FundWatchSettingTab(this.app, this));
     new import_obsidian.Notice("\u57FA\u91D1\u52A8\u6001\uFF1A\u70B9\u51FB\u5DE6\u4FA7\u56FE\u8868\u56FE\u6807\u6253\u5F00\u9762\u677F");
   }
-  async onunload() {
+  onunload() {
   }
   async activateView() {
     const { workspace } = this.app;
@@ -277,12 +355,12 @@ var FundWatchPlugin = class extends import_obsidian.Plugin {
         await leaf.setViewState({ type: VIEW_TYPE_FUND_WATCH, active: true });
       }
     }
-    if (leaf) {
-      workspace.revealLeaf(leaf);
-    }
   }
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const data = asJson(
+      await this.loadData()
+    );
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, data ?? {});
   }
   async saveSettings() {
     await this.saveData(this.settings);

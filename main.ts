@@ -7,7 +7,9 @@ import {
   requestUrl,
   Notice,
   App,
+  apiVersion,
 } from "obsidian";
+import type { SettingDefinitionItem } from "obsidian";
 
 export const VIEW_TYPE_FUND_WATCH = "fund-watch-view";
 
@@ -75,6 +77,11 @@ interface EmKline {
   data?: { klines?: string[] };
 }
 
+// 把 requestUrl 的未知 JSON 结果安全收窄为指定类型，避免 any 扩散
+function asJson<T>(value: unknown): T {
+  return value as T;
+}
+
 // 场内 ETF：实时行情 + 日 K 走势
 async function fetchEtf(code: string): Promise<FundSnapshot> {
   const id = secid(code);
@@ -82,8 +89,8 @@ async function fetchEtf(code: string): Promise<FundSnapshot> {
   const klineUrl = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${id}&fields1=f1,f2,f3&fields2=f51,f52&klt=101&fqt=1&end=20500101&lmt=30`;
   const qResp = await requestUrl({ url: quoteUrl });
   const kResp = await requestUrl({ url: klineUrl });
-  const q = qResp.json() as EmQuote;
-  const k = kResp.json() as EmKline;
+  const q = asJson<EmQuote>(qResp.json() as unknown);
+  const k = asJson<EmKline>(kResp.json() as unknown);
   const d = q.data ?? {};
   const price = parseFloat(d.f2 ?? "");
   const changePercent = parseFloat(d.f3 ?? "");
@@ -121,7 +128,7 @@ async function fetchFund(code: string): Promise<FundSnapshot> {
     url,
     headers: { Referer: "https://m.fund.eastmoney.com/" },
   });
-  const data = res.json() as FundNavResp;
+  const data = asJson<FundNavResp>(res.json() as unknown);
   const datas: FundNavItem[] = data.Datas ?? [];
   if (datas.length === 0) {
     return {
@@ -307,6 +314,21 @@ class FundWatchView extends ItemView {
   }
 }
 
+// 声明式设置 API（Obsidian 1.13.0+）的版本阈值
+const DECLARATIVE_SETTINGS_VERSION = "1.13.0";
+
+function supportsDeclarativeSettings(): boolean {
+  const parse = (v: string): number[] =>
+    v.split(".").map((s) => parseInt(s, 10) || 0);
+  const cur = parse(apiVersion);
+  const min = parse(DECLARATIVE_SETTINGS_VERSION);
+  for (let i = 0; i < 3; i++) {
+    if ((cur[i] ?? 0) > (min[i] ?? 0)) return true;
+    if ((cur[i] ?? 0) < (min[i] ?? 0)) return false;
+  }
+  return true;
+}
+
 class FundWatchSettingTab extends PluginSettingTab {
   plugin: FundWatchPlugin;
 
@@ -314,6 +336,45 @@ class FundWatchSettingTab extends PluginSettingTab {
     super(app, plugin);
   }
 
+  // 1.13.0+ 的声明式设置定义：让设置项进入全局设置搜索，并用于渲染。
+  // 旧版本不识别此方法，会回落到下面的 display()。
+  getSettingDefinitions(): SettingDefinitionItem[] {
+    if (!supportsDeclarativeSettings()) return [];
+    return [
+      {
+        name: "基金列表",
+        desc: "每行一只，格式：代码 [etf|fund]。etf 为场内实时行情，fund 为场外净值（每日更新）。不写类型会按代码前缀自动判断。",
+        aliases: ["fund", "etf", "代码"],
+        control: { type: "textarea", key: "funds", rows: 8 },
+      },
+      {
+        name: "刷新间隔（分钟）",
+        desc: "场内 ETF 行情轮询间隔，建议 1-5 分钟。",
+        control: { type: "number", key: "refreshMinutes", defaultValue: 1 },
+      },
+    ];
+  }
+
+  getControlValue(key: string): unknown {
+    if (key === "funds") return this.plugin.settings.funds;
+    if (key === "refreshMinutes") return this.plugin.settings.refreshMinutes;
+    return undefined;
+  }
+
+  setControlValue(key: string, value: unknown): void | Promise<void> {
+    if (key === "funds" && typeof value === "string") {
+      this.plugin.settings.funds = value;
+      return this.plugin.saveSettings();
+    }
+    if (key === "refreshMinutes") {
+      const n = Math.max(1, parseInt(String(value), 10) || 1);
+      this.plugin.settings.refreshMinutes = n;
+      return this.plugin.saveSettings();
+    }
+    return undefined;
+  }
+
+  // 兜底：旧版 Obsidian（< 1.13.0）走命令式渲染
   display() {
     const { containerEl } = this;
     containerEl.empty();
@@ -328,9 +389,9 @@ class FundWatchSettingTab extends PluginSettingTab {
       .addTextArea((t) => {
         t.inputEl.addClass("fw-textarea");
         t.inputEl.setAttr("rows", 8);
-        t.setValue(this.plugin.settings.funds).onChange(async (v) => {
+        t.setValue(this.plugin.settings.funds).onChange((v) => {
           this.plugin.settings.funds = v;
-          await this.plugin.saveSettings();
+          return this.plugin.saveSettings();
         });
       });
 
@@ -340,9 +401,12 @@ class FundWatchSettingTab extends PluginSettingTab {
       .addText((t) =>
         t
           .setValue(String(this.plugin.settings.refreshMinutes))
-          .onChange(async (v) => {
-            this.plugin.settings.refreshMinutes = Math.max(1, parseInt(v) || 1);
-            await this.plugin.saveSettings();
+          .onChange((v) => {
+            this.plugin.settings.refreshMinutes = Math.max(
+              1,
+              parseInt(v) || 1,
+            );
+            return this.plugin.saveSettings();
           }),
       );
   }
@@ -354,11 +418,15 @@ export default class FundWatchPlugin extends Plugin {
   async onload() {
     await this.loadSettings();
     this.registerView(VIEW_TYPE_FUND_WATCH, (leaf) => new FundWatchView(leaf, this));
-    this.addRibbonIcon("line-chart", "打开基金动态", () => this.activateView());
+    this.addRibbonIcon("line-chart", "打开基金动态", () => {
+      void this.activateView();
+    });
     this.addCommand({
       id: "open-panel",
       name: "打开基金动态面板",
-      callback: () => this.activateView(),
+      callback: () => {
+        void this.activateView();
+      },
     });
     this.addSettingTab(new FundWatchSettingTab(this.app, this));
     new Notice("基金动态：点击左侧图表图标打开面板");
@@ -381,7 +449,9 @@ export default class FundWatchPlugin extends Plugin {
   }
 
   async loadSettings() {
-    const data = (await this.loadData()) as Partial<FundWatchSettings> | null;
+    const data = asJson<Partial<FundWatchSettings> | null>(
+      (await this.loadData()) as unknown,
+    );
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data ?? {});
   }
 
